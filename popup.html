@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>One Sound</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>One Sound</h1>
+      <p class="subtitle">Audio leveler for this tab</p>
+    </header>
+
+    <section class="toggle-row">
+      <label class="switch">
+        <input type="checkbox" id="toggle" />
+        <span class="slider"></span>
+      </label>
+      <span id="status-text">Checking…</span>
+    </section>
+
+    <section class="sensitivity-row">
+      <label for="sensitivity">Sensitivity</label>
+      <select id="sensitivity">
+        <option value="off">Off</option>
+        <option value="light">Light</option>
+        <option value="strong">Strong</option>
+      </select>
+    </section>
+
+    <p id="error" class="error" hidden></p>
+
+    <footer>
+      <p>Applies while this tab is open. Turns off automatically if you close the tab.</p>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
