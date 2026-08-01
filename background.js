@@ -59,26 +59,41 @@ function updateBadge(tabId, active) {
 }
 
 async function startLeveling(tabId) {
-  await ensureOffscreenDocument();
+  try {
+    await ensureOffscreenDocument();
+  } catch (err) {
+    console.error(`[one-sound] failed to create offscreen document (tab ${tabId})`, err);
+    return { ok: false, error: `Couldn't set up audio processing: ${err.message}` };
+  }
 
   let streamId;
   try {
     streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
   } catch (err) {
+    console.error(`[one-sound] tabCapture.getMediaStreamId failed (tab ${tabId})`, err);
     return { ok: false, error: `Couldn't capture this tab: ${err.message}` };
   }
 
   const sensitivity = await getSensitivity();
-  const response = await chrome.runtime.sendMessage({
-    target: 'offscreen',
-    type: 'start-capture',
-    tabId,
-    streamId,
-    sensitivity
-  });
+
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage({
+      target: 'offscreen',
+      type: 'start-capture',
+      tabId,
+      streamId,
+      sensitivity
+    });
+  } catch (err) {
+    console.error(`[one-sound] failed to message offscreen document (tab ${tabId})`, err);
+    return { ok: false, error: `Couldn't reach the audio processor: ${err.message}` };
+  }
 
   if (!response?.ok) {
-    return { ok: false, error: response?.error || 'Offscreen document failed to start capture' };
+    const error = response?.error || 'Offscreen document failed to start capture';
+    console.error(`[one-sound] offscreen start-capture failed (tab ${tabId})`, error);
+    return { ok: false, error };
   }
 
   await setTabActive(tabId, true);
@@ -87,9 +102,11 @@ async function startLeveling(tabId) {
 
 async function stopLeveling(tabId) {
   if (await hasOffscreenDocument()) {
-    await chrome.runtime
-      .sendMessage({ target: 'offscreen', type: 'stop-capture', tabId })
-      .catch(() => {});
+    try {
+      await chrome.runtime.sendMessage({ target: 'offscreen', type: 'stop-capture', tabId });
+    } catch (err) {
+      console.error(`[one-sound] failed to message offscreen document to stop (tab ${tabId})`, err);
+    }
   }
   await setTabActive(tabId, false);
   return { ok: true };
@@ -99,34 +116,41 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.target !== 'background') return false;
 
   (async () => {
-    switch (message.type) {
-      case 'start-capture':
-        sendResponse(await startLeveling(message.tabId));
-        break;
-      case 'stop-capture':
-        sendResponse(await stopLeveling(message.tabId));
-        break;
-      case 'update-sensitivity': {
-        await chrome.storage.sync.set({ sensitivity: message.sensitivity });
-        if (await hasOffscreenDocument()) {
-          await chrome.runtime
-            .sendMessage({
-              target: 'offscreen',
-              type: 'update-sensitivity',
-              sensitivity: message.sensitivity
-            })
-            .catch(() => {});
+    try {
+      switch (message.type) {
+        case 'start-capture':
+          sendResponse(await startLeveling(message.tabId));
+          break;
+        case 'stop-capture':
+          sendResponse(await stopLeveling(message.tabId));
+          break;
+        case 'update-sensitivity': {
+          await chrome.storage.sync.set({ sensitivity: message.sensitivity });
+          if (await hasOffscreenDocument()) {
+            await chrome.runtime
+              .sendMessage({
+                target: 'offscreen',
+                type: 'update-sensitivity',
+                sensitivity: message.sensitivity
+              })
+              .catch((err) => {
+                console.error('[one-sound] failed to push sensitivity update to offscreen document', err);
+              });
+          }
+          sendResponse({ ok: true });
+          break;
         }
-        sendResponse({ ok: true });
-        break;
+        case 'get-status': {
+          const activeTabs = await getActiveTabs();
+          sendResponse({ active: !!activeTabs[message.tabId] });
+          break;
+        }
+        default:
+          sendResponse({ ok: false, error: `Unknown message type: ${message.type}` });
       }
-      case 'get-status': {
-        const activeTabs = await getActiveTabs();
-        sendResponse({ active: !!activeTabs[message.tabId] });
-        break;
-      }
-      default:
-        sendResponse({ ok: false, error: `Unknown message type: ${message.type}` });
+    } catch (err) {
+      console.error(`[one-sound] unhandled error processing "${message.type}"`, err);
+      sendResponse({ ok: false, error: err.message || 'Unexpected error in background service worker' });
     }
   })();
 
@@ -136,6 +160,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 // Tab-level cleanup: capture stopped/errored (e.g. tab navigated, DRM kicked
 // capture off) or the tab itself was closed.
 chrome.tabCapture.onStatusChanged.addListener((info) => {
+  if (info.status === 'error') {
+    console.error(`[one-sound] tabCapture reported an error (tab ${info.tabId})`, info);
+  }
   if (info.status === 'stopped' || info.status === 'error') {
     stopLeveling(info.tabId);
   }

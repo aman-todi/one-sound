@@ -194,7 +194,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           sendResponse({ ok: false, error: `Unknown message type: ${message.type}` });
       }
     } catch (err) {
-      sendResponse({ ok: false, error: err.message });
+      console.error(`[one-sound] offscreen "${message.type}" failed (tab ${message.tabId})`, err);
+      sendResponse({ ok: false, error: err.message || 'Audio capture/processing failed' });
     }
   })();
 
