@@ -71,6 +71,25 @@ function applyCompressorParams(node, p) {
 
 const LOUDNESS_TICK_MS = 100;
 
+// Below this windowed RMS, treat the signal as non-content (background
+// noise, room tone, breaths, silence between words) rather than something
+// to level. Without a gate here, a quiet pause reads as "even quieter
+// content than speech" and the tracker computes an even *larger* desired
+// gain for it than for speech (targetRms / tinyRms), boosting the noise
+// floor and dragging average gain up across the whole stream even during
+// segments that are working fine. 0.02 is a heuristic — well below typical
+// speech RMS (targetRms sits at 0.1-0.12) but above typical mic/room noise
+// — not a per-source-calibrated noise floor, so it may need retuning for
+// unusually noisy or unusually quiet source recordings.
+//
+// This is checked against the PRE-gain signal, not the same
+// output-referenced reading used to compute the correction. If it were
+// checked post-gain, a noise floor the tracker had already boosted (say
+// 4x) could read as "loud enough to be content" purely because of the
+// tracker's own prior correction — the gate would fail to catch exactly
+// the case it exists for.
+const NOISE_GATE_RMS = 0.02;
+
 // Sustained-loudness tracker (deliberately NOT a fast/transient AGC).
 //
 // Both target scenarios — a lecturer drifting off-mic and a loud ad block —
@@ -106,13 +125,26 @@ const LOUDNESS_TICK_MS = 100;
 class LoudnessTracker {
   constructor(audioCtx, params) {
     this.audioCtx = audioCtx;
-    this.analyser = audioCtx.createAnalyser();
-    this.analyser.fftSize = 2048;
     this.gainNode = audioCtx.createGain();
     this.gainNode.gain.value = 1;
+
+    // Post-gain/limiter/trim: measures what's actually about to reach the
+    // ear, used to compute how much correction is still needed.
+    this.analyser = audioCtx.createAnalyser();
+    this.analyser.fftSize = 2048;
     this._buf = new Float32Array(this.analyser.fftSize);
     this._history = [];
     this._historySum = 0;
+
+    // Pre-gain: measures the signal before this tracker touches it, used
+    // only to decide whether there's real content right now (see
+    // NOISE_GATE_RMS above for why this can't share the post-gain reading).
+    this.gateAnalyser = audioCtx.createAnalyser();
+    this.gateAnalyser.fftSize = 2048;
+    this._gateBuf = new Float32Array(this.gateAnalyser.fftSize);
+    this._gateHistory = [];
+    this._gateHistorySum = 0;
+
     this._historyLength = 1;
     this.setParams(params);
     this._interval = setInterval(() => this._tick(), LOUDNESS_TICK_MS);
@@ -132,15 +164,20 @@ class LoudnessTracker {
     while (this._history.length > this._historyLength) {
       this._historySum -= this._history.shift();
     }
+    while (this._gateHistory.length > this._historyLength) {
+      this._gateHistorySum -= this._gateHistory.shift();
+    }
   }
 
   // The node this tracker's gain correction actually applies to (upstream
-  // of the limiter/trim — the real audio path).
+  // of the limiter/trim — the real audio path). Also feeds the gate
+  // analyser, since the gate needs a pre-correction reading.
   connectSignal(node) {
     node.connect(this.gainNode);
+    node.connect(this.gateAnalyser);
   }
 
-  // The node whose loudness is measured to drive that correction —
+  // The node whose loudness is measured to drive the gain correction —
   // downstream of the limiter/trim, i.e. as close to "what you'll actually
   // hear" as the graph gets. See the class comment above for why this is
   // not the same node as connectSignal.
@@ -152,25 +189,38 @@ class LoudnessTracker {
     return this.gainNode;
   }
 
-  _tick() {
-    this.analyser.getFloatTimeDomainData(this._buf);
+  static _rms(analyser, buf) {
+    analyser.getFloatTimeDomainData(buf);
     let sumSquares = 0;
-    for (let i = 0; i < this._buf.length; i++) {
-      const v = this._buf[i];
+    for (let i = 0; i < buf.length; i++) {
+      const v = buf[i];
       sumSquares += v * v;
     }
-    const instantRms = Math.sqrt(sumSquares / this._buf.length);
+    return Math.sqrt(sumSquares / buf.length);
+  }
 
+  _tick() {
+    const gateInstantRms = LoudnessTracker._rms(this.gateAnalyser, this._gateBuf);
+    this._gateHistory.push(gateInstantRms);
+    this._gateHistorySum += gateInstantRms;
+    if (this._gateHistory.length > this._historyLength) {
+      this._gateHistorySum -= this._gateHistory.shift();
+    }
+    const gateWindowedRms = this._gateHistorySum / this._gateHistory.length;
+
+    // Below the noise gate: not real content (silence, room tone, breath).
+    // Hold the last gain instead of chasing it toward maxGain. This also
+    // means the correction-target window below only ever accumulates
+    // actual-content samples, not diluted by gaps.
+    if (gateWindowedRms < NOISE_GATE_RMS) return;
+
+    const instantRms = LoudnessTracker._rms(this.analyser, this._buf);
     this._history.push(instantRms);
     this._historySum += instantRms;
     if (this._history.length > this._historyLength) {
       this._historySum -= this._history.shift();
     }
     const windowedRms = this._historySum / this._history.length;
-
-    // Sustained silence across the whole window: hold the last gain
-    // instead of chasing the noise floor up to maxGain.
-    if (windowedRms < 0.0005) return;
 
     const { targetRms, attackTime, releaseTime, minGain, maxGain } = this.params;
     const desired = Math.min(maxGain, Math.max(minGain, targetRms / windowedRms));
@@ -182,6 +232,7 @@ class LoudnessTracker {
   dispose() {
     clearInterval(this._interval);
     this.analyser.disconnect();
+    this.gateAnalyser.disconnect();
     this.gainNode.disconnect();
   }
 }
