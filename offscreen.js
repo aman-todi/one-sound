@@ -22,7 +22,7 @@ const SENSITIVITY_PRESETS = {
       targetRms: 0.1,
       windowSeconds: 2,
       attackTime: 0.7,
-      releaseTime: 5,
+      releaseTime: 2.5,
       minGain: 1,
       maxGain: 1
     },
@@ -35,7 +35,7 @@ const SENSITIVITY_PRESETS = {
       targetRms: 0.1,
       windowSeconds: 2,
       attackTime: 0.7,
-      releaseTime: 5,
+      releaseTime: 2.5,
       minGain: 0.25,
       maxGain: 4
     },
@@ -48,7 +48,7 @@ const SENSITIVITY_PRESETS = {
       targetRms: 0.12,
       windowSeconds: 1.2,
       attackTime: 0.5,
-      releaseTime: 3.5,
+      releaseTime: 2,
       minGain: 0.15,
       maxGain: 8
     },
@@ -105,14 +105,17 @@ class LoudnessTracker {
 
   setParams(params) {
     this.params = params;
-    const ticks = Math.max(1, Math.round((params.windowSeconds * 1000) / LOUDNESS_TICK_MS));
-    if (ticks !== this._historyLength) {
-      // Window size changed (e.g. sensitivity switch) — restart the
-      // average rather than mixing samples from two different window
-      // lengths.
-      this._historyLength = ticks;
-      this._history = [];
-      this._historySum = 0;
+    this._historyLength = Math.max(1, Math.round((params.windowSeconds * 1000) / LOUDNESS_TICK_MS));
+
+    // Window shrank (e.g. Light -> Strong mid-video): drop the oldest
+    // samples that now fall outside the new window instead of wiping the
+    // whole buffer, so the average — and the gain it drives — doesn't
+    // suddenly reset to a 1-sample reading (audible as a dip/hold at
+    // unity). Growing needs no special handling: the average already
+    // divides by the buffer's actual current length, so it just keeps
+    // accumulating up to the new, larger cap.
+    while (this._history.length > this._historyLength) {
+      this._historySum -= this._history.shift();
     }
   }
 
