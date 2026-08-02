@@ -110,6 +110,11 @@ const NOISE_GATE_RMS = 0.02;
 // than "softened" loud segments. Measuring downstream closes the loop
 // around that so both converge on the same actual heard loudness.
 //
+// Because the measurement is downstream of the gain it drives, the update
+// has to be multiplicative (currentGain * target/measured), not a direct
+// set (target/measured) — see the comment in _tick for why a direct set
+// is wrong once measurement and correction are no longer independent.
+//
 // Instead of driving gain off a single reading, it keeps a rolling
 // average of the last `windowSeconds` of readings — a simple moving
 // average, "what's the general loudness right now" rather than "what's the
@@ -223,9 +228,19 @@ class LoudnessTracker {
     const windowedRms = this._historySum / this._history.length;
 
     const { targetRms, attackTime, releaseTime, minGain, maxGain } = this.params;
-    const desired = Math.min(maxGain, Math.max(minGain, targetRms / windowedRms));
+    const currentGain = this.gainNode.gain.value;
+
+    // Closed-loop (multiplicative) update, not a direct set. windowedRms is
+    // measured downstream of currentGain, i.e. windowedRms ~= currentGain *
+    // (true pre-gain level). Setting gain directly to targetRms/windowedRms
+    // would divide the correct answer by currentGain a second time and
+    // never converge to the right value. Scaling currentGain by the
+    // target/measured ratio cancels that out: currentGain * (targetRms /
+    // (currentGain * x)) = targetRms / x, the actual correct gain,
+    // independent of whatever currentGain already was.
+    const desired = Math.min(maxGain, Math.max(minGain, currentGain * (targetRms / windowedRms)));
     const now = this.audioCtx.currentTime;
-    const timeConstant = desired < this.gainNode.gain.value ? attackTime : releaseTime;
+    const timeConstant = desired < currentGain ? attackTime : releaseTime;
     this.gainNode.gain.setTargetAtTime(desired, now, timeConstant);
   }
 
