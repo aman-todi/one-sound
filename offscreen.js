@@ -61,12 +61,27 @@ function presetFor(sensitivity) {
   return SENSITIVITY_PRESETS[sensitivity] || SENSITIVITY_PRESETS.light;
 }
 
-function applyCompressorParams(node, p) {
-  node.threshold.value = p.threshold;
-  node.knee.value = p.knee;
-  node.ratio.value = p.ratio;
-  node.attack.value = p.attack;
-  node.release.value = p.release;
+// rampSeconds=0 (the default, used at capture start) sets params directly —
+// there's no prior audio through the node yet, nothing to discontinuity
+// against. A sensitivity switch mid-playback needs the ramped path: without
+// it, threshold/knee/ratio/attack/release all snap to new values on the
+// exact same render quantum, an audible jump in the compression curve
+// independent of anything the loudness tracker is doing.
+function applyCompressorParams(node, p, audioCtx, rampSeconds = 0) {
+  if (rampSeconds > 0) {
+    const now = audioCtx.currentTime;
+    node.threshold.setTargetAtTime(p.threshold, now, rampSeconds);
+    node.knee.setTargetAtTime(p.knee, now, rampSeconds);
+    node.ratio.setTargetAtTime(p.ratio, now, rampSeconds);
+    node.attack.setTargetAtTime(p.attack, now, rampSeconds);
+    node.release.setTargetAtTime(p.release, now, rampSeconds);
+  } else {
+    node.threshold.value = p.threshold;
+    node.knee.value = p.knee;
+    node.ratio.value = p.ratio;
+    node.attack.value = p.attack;
+    node.release.value = p.release;
+  }
 }
 
 const LOUDNESS_TICK_MS = 100;
@@ -262,7 +277,7 @@ async function startCapture(tabId, streamId, sensitivity) {
   // gain correction (applied right after this node) has less peaky
   // material to push through the limiter in the first place.
   const compressor = audioCtx.createDynamicsCompressor();
-  applyCompressorParams(compressor, preset.compressor);
+  applyCompressorParams(compressor, preset.compressor, audioCtx);
 
   const loudnessTracker = new LoudnessTracker(audioCtx, preset.loudness);
 
@@ -270,7 +285,7 @@ async function startCapture(tabId, streamId, sensitivity) {
   // bump, feedback) before the multi-second loudness tracker could ever
   // react. Not a scenario-specific "ad detector."
   const limiter = audioCtx.createDynamicsCompressor();
-  applyCompressorParams(limiter, preset.limiter);
+  applyCompressorParams(limiter, preset.limiter, audioCtx);
 
   const outputGain = audioCtx.createGain();
   outputGain.gain.value = preset.outputGain;
@@ -305,15 +320,20 @@ async function stopCapture(tabId) {
   activeCaptures.delete(tabId);
 }
 
+// Ramp time for a live sensitivity switch's compressor/limiter/trim params.
+// Fast enough to feel responsive when picking from the dropdown, slow
+// enough that the compression curve doesn't visibly snap mid-render-quantum.
+const SENSITIVITY_RAMP_SECONDS = 0.3;
+
 function updateSensitivity(tabId, sensitivity) {
   const entry = activeCaptures.get(tabId);
   if (!entry) return;
 
   const preset = presetFor(sensitivity);
-  applyCompressorParams(entry.nodes.compressor, preset.compressor);
+  applyCompressorParams(entry.nodes.compressor, preset.compressor, entry.audioCtx, SENSITIVITY_RAMP_SECONDS);
   entry.nodes.loudnessTracker.setParams(preset.loudness);
-  applyCompressorParams(entry.nodes.limiter, preset.limiter);
-  entry.nodes.outputGain.gain.setTargetAtTime(preset.outputGain, entry.audioCtx.currentTime, 0.05);
+  applyCompressorParams(entry.nodes.limiter, preset.limiter, entry.audioCtx, SENSITIVITY_RAMP_SECONDS);
+  entry.nodes.outputGain.gain.setTargetAtTime(preset.outputGain, entry.audioCtx.currentTime, SENSITIVITY_RAMP_SECONDS);
   entry.sensitivity = sensitivity;
 }
 
