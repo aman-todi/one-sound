@@ -79,8 +79,19 @@ const LOUDNESS_TICK_MS = 100;
 // chasing ordinary word-to-word and pause-to-pause loudness variance within
 // a sentence, which is audible as pumping/breathing.
 //
-// So this taps the (pre-gain) signal with an AnalyserNode every tick, but
-// instead of driving gain off that single reading, it keeps a rolling
+// This is output-referenced, not feed-forward: the AnalyserNode measures
+// the *final* mix (after the downstream limiter and trim), while the
+// GainNode it drives sits upstream of those stages. That's deliberate —
+// tapping pre-limiter would let the limiter's own attenuation go
+// uncompensated. Ad/music content has a higher peak-to-RMS ratio than
+// speech, so it trips the fast limiter far more often; measuring before
+// the limiter meant the tracker thought it had already hit its target RMS
+// while the limiter then quietly pulled loud/peaky content down further,
+// leaving quiet speech (which rarely engages the limiter) landing louder
+// than "softened" loud segments. Measuring downstream closes the loop
+// around that so both converge on the same actual heard loudness.
+//
+// Instead of driving gain off a single reading, it keeps a rolling
 // average of the last `windowSeconds` of readings — a simple moving
 // average, "what's the general loudness right now" rather than "what's the
 // loudness of this 100ms slice." The gain move toward the new target is
@@ -88,6 +99,10 @@ const LOUDNESS_TICK_MS = 100;
 // to settle within a couple of seconds of a genuine sustained change
 // (attackTime), much slower to unwind (releaseTime) so a half-second pause
 // in speech doesn't read as "it's quiet now" and yank the gain up.
+//
+// The control loop runs at 10Hz with multi-second time constants, so it's
+// far too slow relative to the audio graph's near-zero processing delay to
+// self-oscillate — this is a standard slow-feedback design, not a risky one.
 class LoudnessTracker {
   constructor(audioCtx, params) {
     this.audioCtx = audioCtx;
@@ -119,9 +134,18 @@ class LoudnessTracker {
     }
   }
 
-  connectInput(node) {
-    node.connect(this.analyser);
+  // The node this tracker's gain correction actually applies to (upstream
+  // of the limiter/trim — the real audio path).
+  connectSignal(node) {
     node.connect(this.gainNode);
+  }
+
+  // The node whose loudness is measured to drive that correction —
+  // downstream of the limiter/trim, i.e. as close to "what you'll actually
+  // hear" as the graph gets. See the class comment above for why this is
+  // not the same node as connectSignal.
+  connectMeasurement(node) {
+    node.connect(this.analyser);
   }
 
   get output() {
@@ -179,14 +203,13 @@ async function startCapture(tabId, streamId, sensitivity) {
   const source = audioCtx.createMediaStreamSource(stream);
   const preset = presetFor(sensitivity);
 
-  // Kept deliberately: this now does a different job than the loudness
-  // tracker below, not a redundant one. Its attack/release (10-20ms /
-  // 250-300ms) operate on word/syllable-level micro-dynamics — the
-  // second-scale loudness tracker doesn't touch those at all, it only
-  // corrects sustained level. Smoothing the crest factor here also gives
-  // the tracker's RMS measurement a steadier signal to average (less
-  // skewed by individual peaks) and leaves the fast limiter downstream
-  // less work to do.
+  // Kept deliberately: this does a different job than the loudness tracker
+  // below, not a redundant one. Its attack/release (10-20ms / 250-300ms)
+  // operate on word/syllable-level micro-dynamics — the second-scale
+  // loudness tracker doesn't touch those at all, it only corrects
+  // sustained level. Reducing crest factor here also means the tracker's
+  // gain correction (applied right after this node) has less peaky
+  // material to push through the limiter in the first place.
   const compressor = audioCtx.createDynamicsCompressor();
   applyCompressorParams(compressor, preset.compressor);
 
@@ -201,12 +224,16 @@ async function startCapture(tabId, streamId, sensitivity) {
   const outputGain = audioCtx.createGain();
   outputGain.gain.value = preset.outputGain;
 
-  // source -> compressor -> [loudness tracker analyser tap + gain] -> limiter -> outputGain -> destination
+  // Signal path: source -> compressor -> loudness tracker's gain -> limiter -> outputGain -> destination
   source.connect(compressor);
-  loudnessTracker.connectInput(compressor);
+  loudnessTracker.connectSignal(compressor);
   loudnessTracker.output.connect(limiter);
   limiter.connect(outputGain);
   outputGain.connect(audioCtx.destination);
+
+  // Measurement tap: fed from the final output (post-limiter, post-trim),
+  // not from `compressor` — see the LoudnessTracker class comment.
+  loudnessTracker.connectMeasurement(outputGain);
 
   activeCaptures.set(tabId, {
     stream,
