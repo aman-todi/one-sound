@@ -48,7 +48,7 @@ const SENSITIVITY_PRESETS = {
       targetRms: 0.12,
       windowSeconds: 1.2,
       attackTime: 0.5,
-      releaseTime: 2,
+      releaseTime: 2.3,
       minGain: 0.15,
       maxGain: 8
     },
