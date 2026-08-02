@@ -71,24 +71,23 @@ function applyCompressorParams(node, p) {
 
 const LOUDNESS_TICK_MS = 100;
 
-// Below this windowed RMS, treat the signal as non-content (background
-// noise, room tone, breaths, silence between words) rather than something
-// to level. Without a gate here, a quiet pause reads as "even quieter
-// content than speech" and the tracker computes an even *larger* desired
-// gain for it than for speech (targetRms / tinyRms), boosting the noise
-// floor and dragging average gain up across the whole stream even during
-// segments that are working fine. 0.02 is a heuristic — well below typical
-// speech RMS (targetRms sits at 0.1-0.12) but above typical mic/room noise
-// — not a per-source-calibrated noise floor, so it may need retuning for
-// unusually noisy or unusually quiet source recordings.
-//
-// This is checked against the PRE-gain signal, not the same
-// output-referenced reading used to compute the correction. If it were
-// checked post-gain, a noise floor the tracker had already boosted (say
-// 4x) could read as "loud enough to be content" purely because of the
-// tracker's own prior correction — the gate would fail to catch exactly
-// the case it exists for.
+// Below this RMS, treat the signal as non-content (background noise, room
+// tone, breaths, silence between words) rather than something to level.
+// Without a gate here, a quiet pause reads as "even quieter content than
+// speech" and the tracker computes an even *larger* desired gain for it
+// than for speech (targetRms / tinyRms), boosting the noise floor. 0.02 is
+// a heuristic — well below typical speech RMS (targetRms sits at 0.1-0.12)
+// but above typical mic/room noise — not a per-source-calibrated noise
+// floor, so it may need retuning for unusually noisy/quiet recordings.
 const NOISE_GATE_RMS = 0.02;
+
+// Short window for the gate decision ("is there content right now") —
+// deliberately much shorter than the sustained-loudness window below. A
+// 1-2s window (right for tracking sustained level) blends a 1-1.5s pause
+// with the speech on either side of it, so the gate barely dips even
+// during an audible pause. This one only needs to be long enough to smooth
+// individual analyser frames, not to average out real silence.
+const GATE_WINDOW_SECONDS = 0.3;
 
 // Sustained-loudness tracker (deliberately NOT a fast/transient AGC).
 //
@@ -98,22 +97,21 @@ const NOISE_GATE_RMS = 0.02;
 // chasing ordinary word-to-word and pause-to-pause loudness variance within
 // a sentence, which is audible as pumping/breathing.
 //
-// This is output-referenced, not feed-forward: the AnalyserNode measures
-// the *final* mix (after the downstream limiter and trim), while the
-// GainNode it drives sits upstream of those stages. That's deliberate —
-// tapping pre-limiter would let the limiter's own attenuation go
-// uncompensated. Ad/music content has a higher peak-to-RMS ratio than
-// speech, so it trips the fast limiter far more often; measuring before
-// the limiter meant the tracker thought it had already hit its target RMS
-// while the limiter then quietly pulled loud/peaky content down further,
-// leaving quiet speech (which rarely engages the limiter) landing louder
-// than "softened" loud segments. Measuring downstream closes the loop
-// around that so both converge on the same actual heard loudness.
-//
-// Because the measurement is downstream of the gain it drives, the update
-// has to be multiplicative (currentGain * target/measured), not a direct
-// set (target/measured) — see the comment in _tick for why a direct set
-// is wrong once measurement and correction are no longer independent.
+// This is feed-forward: the AnalyserNode taps the same (pre-gain) node the
+// GainNode is fed from, in parallel — so the measurement is independent of
+// the gain being computed. An earlier version measured downstream of the
+// limiter/trim instead (closed-loop) to compensate for the limiter's own
+// attenuation on loud/peaky content. That was reverted after real
+// telemetry showed it oscillating — gain swinging between ~0.7x and ~5.3x
+// within 10-20s of ordinary speech — because the windowed measurement and
+// the gain's own attack/release constants operate on overlapping
+// timescales, so the reading always lags the actual current gain and the
+// correction overshoots every tick. Feed-forward has no such loop: the
+// measurement can't be influenced by a gain decision it's used to compute,
+// so it can't oscillate. (The limiter-compensation problem this was
+// solving is real but smaller than a gain that never settles down; a
+// non-feedback fix — e.g. reading the limiter's own `.reduction` value
+// directly instead of inferring it — is a better route if that's revisited.)
 //
 // Instead of driving gain off a single reading, it keeps a rolling
 // average of the last `windowSeconds` of readings — a simple moving
@@ -123,34 +121,26 @@ const NOISE_GATE_RMS = 0.02;
 // to settle within a couple of seconds of a genuine sustained change
 // (attackTime), much slower to unwind (releaseTime) so a half-second pause
 // in speech doesn't read as "it's quiet now" and yank the gain up.
-//
-// The control loop runs at 10Hz with multi-second time constants, so it's
-// far too slow relative to the audio graph's near-zero processing delay to
-// self-oscillate — this is a standard slow-feedback design, not a risky one.
 class LoudnessTracker {
   constructor(audioCtx, params) {
     this.audioCtx = audioCtx;
-    this.gainNode = audioCtx.createGain();
-    this.gainNode.gain.value = 1;
-
-    // Post-gain/limiter/trim: measures what's actually about to reach the
-    // ear, used to compute how much correction is still needed.
     this.analyser = audioCtx.createAnalyser();
     this.analyser.fftSize = 2048;
     this._buf = new Float32Array(this.analyser.fftSize);
-    this._history = [];
-    this._historySum = 0;
 
-    // Pre-gain: measures the signal before this tracker touches it, used
-    // only to decide whether there's real content right now (see
-    // NOISE_GATE_RMS above for why this can't share the post-gain reading).
-    this.gateAnalyser = audioCtx.createAnalyser();
-    this.gateAnalyser.fftSize = 2048;
-    this._gateBuf = new Float32Array(this.gateAnalyser.fftSize);
+    this.gainNode = audioCtx.createGain();
+    this.gainNode.gain.value = 1;
+
+    // Short window: gate decision.
+    this._gateHistoryLength = Math.max(1, Math.round((GATE_WINDOW_SECONDS * 1000) / LOUDNESS_TICK_MS));
     this._gateHistory = [];
     this._gateHistorySum = 0;
 
+    // Long window: sustained-loudness correction target.
+    this._history = [];
+    this._historySum = 0;
     this._historyLength = 1;
+
     this._tickCount = 0;
     this.setParams(params);
     this._interval = setInterval(() => this._tick(), LOUDNESS_TICK_MS);
@@ -170,25 +160,11 @@ class LoudnessTracker {
     while (this._history.length > this._historyLength) {
       this._historySum -= this._history.shift();
     }
-    while (this._gateHistory.length > this._historyLength) {
-      this._gateHistorySum -= this._gateHistory.shift();
-    }
   }
 
-  // The node this tracker's gain correction actually applies to (upstream
-  // of the limiter/trim — the real audio path). Also feeds the gate
-  // analyser, since the gate needs a pre-correction reading.
-  connectSignal(node) {
-    node.connect(this.gainNode);
-    node.connect(this.gateAnalyser);
-  }
-
-  // The node whose loudness is measured to drive the gain correction —
-  // downstream of the limiter/trim, i.e. as close to "what you'll actually
-  // hear" as the graph gets. See the class comment above for why this is
-  // not the same node as connectSignal.
-  connectMeasurement(node) {
+  connectInput(node) {
     node.connect(this.analyser);
+    node.connect(this.gainNode);
   }
 
   get output() {
@@ -206,29 +182,29 @@ class LoudnessTracker {
   }
 
   _tick() {
-    const gateInstantRms = LoudnessTracker._rms(this.gateAnalyser, this._gateBuf);
-    this._gateHistory.push(gateInstantRms);
-    this._gateHistorySum += gateInstantRms;
-    if (this._gateHistory.length > this._historyLength) {
+    const instantRms = LoudnessTracker._rms(this.analyser, this._buf);
+
+    this._gateHistory.push(instantRms);
+    this._gateHistorySum += instantRms;
+    if (this._gateHistory.length > this._gateHistoryLength) {
       this._gateHistorySum -= this._gateHistory.shift();
     }
-    const gateWindowedRms = this._gateHistorySum / this._gateHistory.length;
+    const gateRms = this._gateHistorySum / this._gateHistory.length;
 
     // Below the noise gate: not real content (silence, room tone, breath).
     // Hold the last gain instead of chasing it toward maxGain. This also
     // means the correction-target window below only ever accumulates
     // actual-content samples, not diluted by gaps.
-    if (gateWindowedRms < NOISE_GATE_RMS) {
+    if (gateRms < NOISE_GATE_RMS) {
       this._tickCount++;
       if (this._tickCount % 10 === 0) {
         console.debug(
-          `[one-sound] gate=${gateWindowedRms.toFixed(4)} (below ${NOISE_GATE_RMS}, holding) gain=${this.gainNode.gain.value.toFixed(2)}`
+          `[one-sound] gate=${gateRms.toFixed(4)} (below ${NOISE_GATE_RMS}, holding) gain=${this.gainNode.gain.value.toFixed(2)}`
         );
       }
       return;
     }
 
-    const instantRms = LoudnessTracker._rms(this.analyser, this._buf);
     this._history.push(instantRms);
     this._historySum += instantRms;
     if (this._history.length > this._historyLength) {
@@ -238,16 +214,7 @@ class LoudnessTracker {
 
     const { targetRms, attackTime, releaseTime, minGain, maxGain } = this.params;
     const currentGain = this.gainNode.gain.value;
-
-    // Closed-loop (multiplicative) update, not a direct set. windowedRms is
-    // measured downstream of currentGain, i.e. windowedRms ~= currentGain *
-    // (true pre-gain level). Setting gain directly to targetRms/windowedRms
-    // would divide the correct answer by currentGain a second time and
-    // never converge to the right value. Scaling currentGain by the
-    // target/measured ratio cancels that out: currentGain * (targetRms /
-    // (currentGain * x)) = targetRms / x, the actual correct gain,
-    // independent of whatever currentGain already was.
-    const desired = Math.min(maxGain, Math.max(minGain, currentGain * (targetRms / windowedRms)));
+    const desired = Math.min(maxGain, Math.max(minGain, targetRms / windowedRms));
     const now = this.audioCtx.currentTime;
     const timeConstant = desired < currentGain ? attackTime : releaseTime;
     this.gainNode.gain.setTargetAtTime(desired, now, timeConstant);
@@ -257,7 +224,7 @@ class LoudnessTracker {
     this._tickCount++;
     if (this._tickCount % 10 === 0) {
       console.debug(
-        `[one-sound] gate=${gateWindowedRms.toFixed(4)} measured=${windowedRms.toFixed(4)} ` +
+        `[one-sound] gate=${gateRms.toFixed(4)} measured=${windowedRms.toFixed(4)} ` +
           `target=${targetRms} gain=${currentGain.toFixed(2)}->${desired.toFixed(2)}`
       );
     }
@@ -266,7 +233,6 @@ class LoudnessTracker {
   dispose() {
     clearInterval(this._interval);
     this.analyser.disconnect();
-    this.gateAnalyser.disconnect();
     this.gainNode.disconnect();
   }
 }
@@ -309,16 +275,12 @@ async function startCapture(tabId, streamId, sensitivity) {
   const outputGain = audioCtx.createGain();
   outputGain.gain.value = preset.outputGain;
 
-  // Signal path: source -> compressor -> loudness tracker's gain -> limiter -> outputGain -> destination
+  // source -> compressor -> [loudness tracker analyser tap + gain] -> limiter -> outputGain -> destination
   source.connect(compressor);
-  loudnessTracker.connectSignal(compressor);
+  loudnessTracker.connectInput(compressor);
   loudnessTracker.output.connect(limiter);
   limiter.connect(outputGain);
   outputGain.connect(audioCtx.destination);
-
-  // Measurement tap: fed from the final output (post-limiter, post-trim),
-  // not from `compressor` — see the LoudnessTracker class comment.
-  loudnessTracker.connectMeasurement(outputGain);
 
   activeCaptures.set(tabId, {
     stream,
