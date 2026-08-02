@@ -151,6 +151,7 @@ class LoudnessTracker {
     this._gateHistorySum = 0;
 
     this._historyLength = 1;
+    this._tickCount = 0;
     this.setParams(params);
     this._interval = setInterval(() => this._tick(), LOUDNESS_TICK_MS);
   }
@@ -217,7 +218,15 @@ class LoudnessTracker {
     // Hold the last gain instead of chasing it toward maxGain. This also
     // means the correction-target window below only ever accumulates
     // actual-content samples, not diluted by gaps.
-    if (gateWindowedRms < NOISE_GATE_RMS) return;
+    if (gateWindowedRms < NOISE_GATE_RMS) {
+      this._tickCount++;
+      if (this._tickCount % 10 === 0) {
+        console.debug(
+          `[one-sound] gate=${gateWindowedRms.toFixed(4)} (below ${NOISE_GATE_RMS}, holding) gain=${this.gainNode.gain.value.toFixed(2)}`
+        );
+      }
+      return;
+    }
 
     const instantRms = LoudnessTracker._rms(this.analyser, this._buf);
     this._history.push(instantRms);
@@ -242,6 +251,16 @@ class LoudnessTracker {
     const now = this.audioCtx.currentTime;
     const timeConstant = desired < currentGain ? attackTime : releaseTime;
     this.gainNode.gain.setTargetAtTime(desired, now, timeConstant);
+
+    // Throttled diagnostic log (~1x/sec) — open this offscreen document's
+    // devtools console to read real numbers instead of guessing at them.
+    this._tickCount++;
+    if (this._tickCount % 10 === 0) {
+      console.debug(
+        `[one-sound] gate=${gateWindowedRms.toFixed(4)} measured=${windowedRms.toFixed(4)} ` +
+          `target=${targetRms} gain=${currentGain.toFixed(2)}->${desired.toFixed(2)}`
+      );
+    }
   }
 
   dispose() {
