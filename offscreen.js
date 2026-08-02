@@ -5,6 +5,12 @@
 /** tabId -> { stream, audioCtx, source, sensitivity, nodes: { compressor, loudnessTracker, limiter, outputGain } } */
 const activeCaptures = new Map();
 
+// Flip to true to re-enable the loudness tracker's throttled console.debug
+// telemetry (gate/measured RMS, target, gain transitions) when diagnosing
+// leveling behavior. Left in place rather than deleted since it's what
+// resolved the oscillation bug during tuning.
+const DEBUG = false;
+
 // "off" is a true bypass: ratio 1 on both compressors is a no-op, and
 // clamping the loudness tracker's gain to exactly 1 means it never touches
 // the signal. Same graph topology as light/strong, just neutral parameters —
@@ -211,11 +217,13 @@ class LoudnessTracker {
     // means the correction-target window below only ever accumulates
     // actual-content samples, not diluted by gaps.
     if (gateRms < NOISE_GATE_RMS) {
-      this._tickCount++;
-      if (this._tickCount % 10 === 0) {
-        console.debug(
-          `[one-sound] gate=${gateRms.toFixed(4)} (below ${NOISE_GATE_RMS}, holding) gain=${this.gainNode.gain.value.toFixed(2)}`
-        );
+      if (DEBUG) {
+        this._tickCount++;
+        if (this._tickCount % 10 === 0) {
+          console.debug(
+            `[one-sound] gate=${gateRms.toFixed(4)} (below ${NOISE_GATE_RMS}, holding) gain=${this.gainNode.gain.value.toFixed(2)}`
+          );
+        }
       }
       return;
     }
@@ -234,14 +242,17 @@ class LoudnessTracker {
     const timeConstant = desired < currentGain ? attackTime : releaseTime;
     this.gainNode.gain.setTargetAtTime(desired, now, timeConstant);
 
-    // Throttled diagnostic log (~1x/sec) — open this offscreen document's
-    // devtools console to read real numbers instead of guessing at them.
-    this._tickCount++;
-    if (this._tickCount % 10 === 0) {
-      console.debug(
-        `[one-sound] gate=${gateRms.toFixed(4)} measured=${windowedRms.toFixed(4)} ` +
-          `target=${targetRms} gain=${currentGain.toFixed(2)}->${desired.toFixed(2)}`
-      );
+    // Throttled diagnostic log (~1x/sec when DEBUG is on) — open this
+    // offscreen document's devtools console to read real numbers instead
+    // of guessing at them.
+    if (DEBUG) {
+      this._tickCount++;
+      if (this._tickCount % 10 === 0) {
+        console.debug(
+          `[one-sound] gate=${gateRms.toFixed(4)} measured=${windowedRms.toFixed(4)} ` +
+            `target=${targetRms} gain=${currentGain.toFixed(2)}->${desired.toFixed(2)}`
+        );
+      }
     }
   }
 
