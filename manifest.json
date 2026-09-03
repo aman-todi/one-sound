@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "One Sound — Audio Leveler",
+  "version": "0.1.0",
+  "description": "Automatically levels wildly inconsistent tab audio (quiet lectures, loud ads) using tabCapture and Web Audio compression/AGC.",
+  "permissions": ["tabCapture", "offscreen", "storage", "activeTab"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "One Sound — Audio Leveler"
+  }
+}
