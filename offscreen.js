@@ -2,7 +2,7 @@
 // a persistent Web Audio graph in MV3. One AudioContext per captured tab,
 // keyed by tabId, so leveling is independent per tab.
 
-/** tabId -> { stream, audioCtx, source, sensitivity, nodes: { compressor, loudnessTracker, limiter, outputGain } } */
+/** tabId -> { stream, audioCtx, source, sensitivity, nodes: { compressor, loudnessTracker, limiter } } */
 const activeCaptures = new Map();
 
 // Flip to true to re-enable the loudness tracker's throttled console.debug
@@ -32,8 +32,7 @@ const SENSITIVITY_PRESETS = {
       minGain: 1,
       maxGain: 1
     },
-    limiter: { threshold: 0, knee: 0, ratio: 1, attack: 0.003, release: 0.25 },
-    outputGain: 1
+    limiter: { threshold: 0, knee: 0, ratio: 1, attack: 0.003, release: 0.25 }
   },
   light: {
     compressor: { threshold: -24, knee: 30, ratio: 3, attack: 0.02, release: 0.3 },
@@ -45,8 +44,7 @@ const SENSITIVITY_PRESETS = {
       minGain: 0.25,
       maxGain: 4
     },
-    limiter: { threshold: -3, knee: 0, ratio: 20, attack: 0.003, release: 0.1 },
-    outputGain: 1
+    limiter: { threshold: -3, knee: 0, ratio: 20, attack: 0.003, release: 0.1 }
   },
   strong: {
     compressor: { threshold: -30, knee: 10, ratio: 6, attack: 0.01, release: 0.25 },
@@ -58,8 +56,7 @@ const SENSITIVITY_PRESETS = {
       minGain: 0.15,
       maxGain: 8
     },
-    limiter: { threshold: -1, knee: 0, ratio: 20, attack: 0.003, release: 0.08 },
-    outputGain: 1
+    limiter: { threshold: -1, knee: 0, ratio: 20, attack: 0.003, release: 0.08 }
   }
 };
 
@@ -121,7 +118,7 @@ const GATE_WINDOW_SECONDS = 0.3;
 // This is feed-forward: the AnalyserNode taps the same (pre-gain) node the
 // GainNode is fed from, in parallel — so the measurement is independent of
 // the gain being computed. An earlier version measured downstream of the
-// limiter/trim instead (closed-loop) to compensate for the limiter's own
+// limiter instead (closed-loop) to compensate for the limiter's own
 // attenuation on loud/peaky content. That was reverted after real
 // telemetry showed it oscillating — gain swinging between ~0.7x and ~5.3x
 // within 10-20s of ordinary speech — because the windowed measurement and
@@ -298,22 +295,18 @@ async function startCapture(tabId, streamId, sensitivity) {
   const limiter = audioCtx.createDynamicsCompressor();
   applyCompressorParams(limiter, preset.limiter, audioCtx);
 
-  const outputGain = audioCtx.createGain();
-  outputGain.gain.value = preset.outputGain;
-
-  // source -> compressor -> [loudness tracker analyser tap + gain] -> limiter -> outputGain -> destination
+  // source -> compressor -> [loudness tracker analyser tap + gain] -> limiter -> destination
   source.connect(compressor);
   loudnessTracker.connectInput(compressor);
   loudnessTracker.output.connect(limiter);
-  limiter.connect(outputGain);
-  outputGain.connect(audioCtx.destination);
+  limiter.connect(audioCtx.destination);
 
   activeCaptures.set(tabId, {
     stream,
     audioCtx,
     source,
     sensitivity,
-    nodes: { compressor, loudnessTracker, limiter, outputGain }
+    nodes: { compressor, loudnessTracker, limiter }
   });
 }
 
@@ -331,9 +324,9 @@ async function stopCapture(tabId) {
   activeCaptures.delete(tabId);
 }
 
-// Ramp time for a live sensitivity switch's compressor/limiter/trim params.
-// Fast enough to feel responsive when picking from the dropdown, slow
-// enough that the compression curve doesn't visibly snap mid-render-quantum.
+// Ramp time for a live sensitivity switch's compressor/limiter params. Fast
+// enough to feel responsive when picking from the dropdown, slow enough
+// that the compression curve doesn't visibly snap mid-render-quantum.
 const SENSITIVITY_RAMP_SECONDS = 0.3;
 
 function updateSensitivity(tabId, sensitivity) {
@@ -344,7 +337,6 @@ function updateSensitivity(tabId, sensitivity) {
   applyCompressorParams(entry.nodes.compressor, preset.compressor, entry.audioCtx, SENSITIVITY_RAMP_SECONDS);
   entry.nodes.loudnessTracker.setParams(preset.loudness);
   applyCompressorParams(entry.nodes.limiter, preset.limiter, entry.audioCtx, SENSITIVITY_RAMP_SECONDS);
-  entry.nodes.outputGain.gain.setTargetAtTime(preset.outputGain, entry.audioCtx.currentTime, SENSITIVITY_RAMP_SECONDS);
   entry.sensitivity = sensitivity;
 }
 
