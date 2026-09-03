@@ -51,7 +51,7 @@ const SENSITIVITY_PRESETS = {
   strong: {
     compressor: { threshold: -30, knee: 10, ratio: 6, attack: 0.01, release: 0.25 },
     loudness: {
-      targetRms: 0.072,
+      targetRms: 0.066,
       windowSeconds: 1.2,
       attackTime: 0.5,
       releaseTime: 2.3,
@@ -59,7 +59,7 @@ const SENSITIVITY_PRESETS = {
       maxGain: 8
     },
     limiter: { threshold: -1, knee: 0, ratio: 20, attack: 0.003, release: 0.08 },
-    outputGain: 0.95
+    outputGain: 1
   }
 };
 

@@ -178,8 +178,14 @@ tracker could never react to in time. It is **not** a scenario-specific
 
 #### 4. Final trim
 
-A static `GainNode` applied last, mostly used to shave a little headroom
-on the more aggressive "Strong" preset.
+A static `GainNode` applied last — a fixed, non-reactive multiplier, as
+opposed to everything upstream of it which continuously adapts. Currently
+1.0 (no-op) on every preset: an earlier version used this to knock 5% off
+the "Strong" preset's overall loudness, but that was really working
+around `targetRms` being set too high rather than a genuine need for a
+separate trim stage, so it was folded into `targetRms` directly instead.
+Left in the graph as a ready-made lever for a future preset that needs
+one.
 
 ### Sensitivity presets
 
@@ -192,12 +198,12 @@ capture, and "Off" doubles as a passthrough sanity check.
 | | **Off** | **Light** | **Strong** |
 |---|---|---|---|
 | Front compressor threshold / ratio | 0 dB / 1:1 (no-op) | −24 dB / 3:1 | −30 dB / 6:1 |
-| Loudness target RMS | 0.06 *(inert — see below)* | 0.06 | 0.072 |
+| Loudness target RMS | 0.06 *(inert — see below)* | 0.06 | 0.066 |
 | Sustained window | 2s | 2s | 1.2s |
 | Attack / release (τ) | 0.7s / 2.5s | 0.7s / 2.5s | 0.5s / 2.3s |
 | Gain range | 1x–1x (locked) | 0.25x–4x | 0.15x–8x |
 | Limiter threshold / ratio | 0 dB / 1:1 (no-op) | −3 dB / 20:1 | −1 dB / 20:1 |
-| Final trim | 1.0 | 1.0 | 0.95 |
+| Final trim | 1.0 | 1.0 | 1.0 |
 
 *Off's `targetRms`/window/attack/release values are present for
 structural consistency but never actually affect output — `minGain` and
