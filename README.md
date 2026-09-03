@@ -82,7 +82,6 @@ MediaStreamSource
   → DynamicsCompressorNode         (micro-dynamics)
   → LoudnessTracker's GainNode     (sustained-loudness correction)
   → DynamicsCompressorNode         (fast safety-net limiter)
-  → GainNode                       (final trim)
   → AudioContext.destination
 ```
 
@@ -176,17 +175,6 @@ instantaneous spike (mic bump, feedback) the multi-second loudness
 tracker could never react to in time. It is **not** a scenario-specific
 "ad detector"; the loudness tracker owns that job.
 
-#### 4. Final trim
-
-A static `GainNode` applied last — a fixed, non-reactive multiplier, as
-opposed to everything upstream of it which continuously adapts. Currently
-1.0 (no-op) on every preset: an earlier version used this to knock 5% off
-the "Strong" preset's overall loudness, but that was really working
-around `targetRms` being set too high rather than a genuine need for a
-separate trim stage, so it was folded into `targetRms` directly instead.
-Left in the graph as a ready-made lever for a future preset that needs
-one.
-
 ### Sensitivity presets
 
 All three settings run the exact same graph topology — only the
@@ -203,16 +191,14 @@ capture, and "Off" doubles as a passthrough sanity check.
 | Attack / release (τ) | 0.7s / 2.5s | 0.7s / 2.5s | 0.5s / 2.3s |
 | Gain range | 1x–1x (locked) | 0.25x–4x | 0.15x–8x |
 | Limiter threshold / ratio | 0 dB / 1:1 (no-op) | −3 dB / 20:1 | −1 dB / 20:1 |
-| Final trim | 1.0 | 1.0 | 1.0 |
 
 *Off's `targetRms`/window/attack/release values are present for
 structural consistency but never actually affect output — `minGain` and
 `maxGain` are both locked to 1, so `clamp(anything, 1, 1)` is always 1.*
 
-Switching sensitivity mid-playback ramps all of these (compressor,
-limiter, and trim params) over 0.3s rather than snapping them, so there's
-no audible jump in the compression curve at the exact moment you change
-the dropdown.
+Switching sensitivity mid-playback ramps the compressor and limiter
+params over 0.3s rather than snapping them, so there's no audible jump in
+the compression curve at the exact moment you change the dropdown.
 
 The `targetRms`/gain-range numbers above were arrived at empirically —
 tuned by ear against real lecture-style content, not derived from a
