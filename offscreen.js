@@ -97,7 +97,7 @@ const LOUDNESS_TICK_MS = 100;
 // Without a gate here, a quiet pause reads as "even quieter content than
 // speech" and the tracker computes an even *larger* desired gain for it
 // than for speech (targetRms / tinyRms), boosting the noise floor. 0.02 is
-// a heuristic — well below typical speech RMS (targetRms sits at 0.1-0.12)
+// a heuristic — well below typical speech RMS (targetRms sits at 0.06-0.072)
 // but above typical mic/room noise — not a per-source-calibrated noise
 // floor, so it may need retuning for unusually noisy/quiet recordings.
 const NOISE_GATE_RMS = 0.02;
